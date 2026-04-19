@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual env
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Results
+results/
+results_sift_gradfusion/
+outputs/
+logs/
+
+# Images generated
+images/
+
+# Models
+*.pth
+*.pt
+*.ckpt
+
+# OS
+.DS_Store
