@@ -190,7 +190,7 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
                 result_root=result_root_rise,
                 base_name=base,
                 orig_img=img_np_raw,
-                variants=['baseline', 'sift'],
+                variants=['baseline', 'sift_only', 'sift_grad', 'sift_grad_consensus'],
                 n_masks=600,
                 batch_size=4,
                 mask_size=16,

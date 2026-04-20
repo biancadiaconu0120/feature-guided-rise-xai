@@ -245,7 +245,7 @@ def plot_curves_example(curves_dict, out_path, title="Deletion/Insertion example
 def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                  methods=None, steps=50, batch=16, n_examples=6, baseline_method='baseline', device=None):
     if methods is None:
-        methods = ['baseline', 'sift']
+        methods = ['baseline', 'sift_only', 'sift_grad', 'sift_grad_consensus']
     out_root = os.path.join(results_root, "evaluation_rise")
     os.makedirs(out_root, exist_ok=True)
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')

@@ -1,29 +1,88 @@
+# =========================
 # Python
+# =========================
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
 
-# Virtual env
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =========================
+# Virtual Environments
+# =========================
 .venv/
 venv/
+env/
+ENV/
 
-# IDE
+# =========================
+# IDE / Editors
+# =========================
 .idea/
 .vscode/
+*.swp
+*.swo
 
-# Results
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Results / Outputs
+# =========================
 results/
 results_sift_gradfusion/
 outputs/
-logs/
+runs/
+checkpoints/
+temp/
+tmp/
 
-# Images generated
+# =========================
+# Generated Images / Media
+# =========================
 images/
+*.png
+*.jpg
+*.jpeg
+*.gif
 
-# Models
+# =========================
+# Trained Models
+# =========================
 *.pth
 *.pt
 *.ckpt
+*.onnx
+*.h5
+*.pkl
+*.joblib
 
-# OS
+# =========================
+# Large External Dependency
+# =========================
+stylegan2-ada-pytorch/
+
+# =========================
+# OS Files
+# =========================
 .DS_Store
+Thumbs.db
+
+# =========================
+# Secrets
+# =========================
+.env
+.env.*
+*.key
+*.pem
+credentials.json
