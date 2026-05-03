@@ -423,47 +423,43 @@ def extract_sift_density_map(orig_img, H, W):
             radius = max(1, int(round(0.35 * kp.size)))
             cv2.circle(density, (x, y), radius, weight, -1)
 
-    density = cv2.GaussianBlur(density, (7, 7), 0)
+    density = cv2.GaussianBlur(density, (15, 15), 0)
     density = _normalize_map(density)
 
     # remove very weak residual regions
-    density[density < 0.05] = 0.0
+    density[density < 0.10] = 0.0
 
     density = _normalize_map(density)
     return density
 
+
 def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cpu'):
     masks = []
 
-    density_small = cv2.resize(density_map, (mask_size, mask_size), interpolation=cv2.INTER_LINEAR)
-    density_small = density_small.astype(np.float32)
+    density_small = cv2.resize(
+        density_map,
+        (mask_size, mask_size),
+        interpolation=cv2.INTER_AREA
+    ).astype(np.float32)
 
-    if density_small.max() > 0:
-        density_small = density_small / (density_small.max() + 1e-8)
+    density_small = _normalize_map(density_small)
 
-    # emphasize strong regions, but keep enough flexibility
-    density_small = density_small ** 1.8
+    # stronger SIFT guidance
+    density_small = density_small ** 1.3
 
-    # identify stronger structural regions
-    if np.any(density_small > 0):
-        thr = np.percentile(density_small[density_small > 0], 65)
-    else:
-        thr = 0.0
+    # keep small random probability so it remains RISE-like/model-agnostic
+    base_prob = 0.10
+    sift_strength = 0.75
 
-    strong = (density_small >= thr).astype(np.float32)
-
-    # probability map: guided, but not too rigid
-    prob = np.clip(0.03 + 0.35 * strong + 0.30 * density_small, 0.0, 0.70)
+    prob = base_prob + sift_strength * density_small
+    prob = np.clip(prob, 0.05, 0.90)
 
     for _ in range(n_masks):
         random_mask = np.random.rand(mask_size, mask_size)
         binary_mask = (random_mask < prob).astype(np.float32)
 
-        # resize to image size
         mask = cv2.resize(binary_mask, (W, H), interpolation=cv2.INTER_LINEAR)
-
-        # soften mask borders to reduce blockiness
-        mask = cv2.GaussianBlur(mask, (9, 9), 0)
+        mask = cv2.GaussianBlur(mask, (11, 11), 0)
         mask = np.clip(mask, 0.0, 1.0)
 
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
@@ -471,6 +467,7 @@ def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cp
 
     masks = torch.cat(masks, dim=0)
     return masks.to(device)
+
 
 def sift_only_rise(model, input_tensor, class_idx, orig_img,
                    n_masks=200, mask_size=8, batch_size=32, device=None):
@@ -528,6 +525,7 @@ def sift_only_rise(model, input_tensor, class_idx, orig_img,
 
     return _normalize_map(saliency)
 
+
 def generate_rise(model, input_tensor, class_idx,
                   result_root=None, base_name=None, orig_img=None,
                   variants=None,
@@ -544,7 +542,7 @@ def generate_rise(model, input_tensor, class_idx,
         try:
             m = baseline_rise(
                 model, input_tensor, class_idx,
-                N=250, s=16, p1=0.5,
+                N=n_masks, s=mask_size, p1=0.5,
                 batch_size=batch_size, device=device,
                 norm_mean=norm_mean, norm_std=norm_std
             )
@@ -576,7 +574,6 @@ def generate_rise(model, input_tensor, class_idx,
         except Exception as e:
             print("Warning: contrast_rise failed:", e)
 
-
     if 'sift_only' in variants:
         try:
             print("DEBUG: entered sift_only block")
@@ -603,8 +600,6 @@ def generate_rise(model, input_tensor, class_idx,
 
         except Exception as e:
             print("DEBUG: sift_only_rise failed:", repr(e))
-
-
 
     if 'combined' in variants:
         try:

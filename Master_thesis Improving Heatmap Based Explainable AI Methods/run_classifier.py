@@ -84,8 +84,15 @@ class Log:
 # =========================
 # PATHS
 # =========================
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'stylegan2-ada-pytorch')))
-sys.path.append("../stylegan2-ada-pytorch")
+PROJECT_ROOT = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), "..")
+)
+
+STYLEGAN_PATH = os.path.join(PROJECT_ROOT, "stylegan2-ada-pytorch")
+
+print("DEBUG StyleGAN path:", STYLEGAN_PATH)
+
+sys.path.insert(0, STYLEGAN_PATH)
 
 from utils import load_discriminator
 
@@ -225,9 +232,9 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
                 base_name=base,
                 orig_img=img_np_raw,
                 variants=["baseline", "sift_only"],  # ONLY 2 METHODS
-                n_masks=100,
-                batch_size=1,
-                mask_size=8,
+                n_masks=500,
+                batch_size=4,
+                mask_size=16,
                 device=DEVICE
             )
 
