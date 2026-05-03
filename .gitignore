@@ -67,10 +67,6 @@ images/
 *.pkl
 *.joblib
 
-# =========================
-# Large External Dependency
-# =========================
-stylegan2-ada-pytorch/
 
 # =========================
 # OS Files
@@ -86,3 +82,7 @@ Thumbs.db
 *.key
 *.pem
 credentials.json
+
+results*/
+
+stylegan2-ada-pytorch/
