@@ -1,17 +1,94 @@
+import builtins
+
+# =========================
+# FILTER TERMINAL SPAM
+# =========================
+_original_print = builtins.print
+
+def filtered_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+
+    hide = [
+        "Setting up PyTorch plugin",
+        "upfirdn2d_plugin",
+        "Evaluating images:",
+        "Processing:",
+    ]
+
+    if any(text in msg for text in hide):
+        return
+
+    _original_print(*args, **kwargs)
+
+builtins.print = filtered_print
+
+
 import os
+import warnings
+
+os.environ["TORCH_CPP_LOG_LEVEL"] = "ERROR"
+warnings.filterwarnings("ignore")
+
 import sys
+
+# =========================
+# FIX IMPORT PATH (VERY IMPORTANT FOR RISE)
+# =========================
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+
 import torch
 from torchvision import transforms
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
 from sklearn.metrics import roc_curve, auc
 
+
+# =========================
+# LOGGER
+# =========================
+class Log:
+    RESET = "\033[0m"
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    YELLOW = "\033[93m"
+    BLUE = "\033[94m"
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+
+    @staticmethod
+    def info(msg):
+        print(f"{Log.BLUE}[INFO]{Log.RESET} {msg}")
+
+    @staticmethod
+    def success(msg):
+        print(f"{Log.GREEN}[OK]{Log.RESET} {msg}")
+
+    @staticmethod
+    def warn(msg):
+        print(f"{Log.YELLOW}[WARN]{Log.RESET} {msg}")
+
+    @staticmethod
+    def error(msg):
+        print(f"{Log.RED}[ERROR]{Log.RESET} {msg}")
+
+    @staticmethod
+    def debug(msg):
+        print(f"{Log.CYAN}[DEBUG]{Log.RESET} {msg}")
+
+    @staticmethod
+    def section(title):
+        print(f"\n{Log.BOLD}==== {title} ===={Log.RESET}")
+
+
+# =========================
+# PATHS
+# =========================
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'stylegan2-ada-pytorch')))
 sys.path.append("../stylegan2-ada-pytorch")
 
 from utils import load_discriminator
+
 from grad_cam import (
     baseline_gradcam,
     multilayer_gradcam,
@@ -23,15 +100,23 @@ from grad_cam import (
 )
 
 try:
+    import rise
     from rise import generate_rise
 
+    Log.success(f"Using RISE file: {rise.__file__}")
     has_rise = True
 except Exception as e:
-    print("Warning: could not import rise.py:", repr(e))
+    Log.error(f"Could not import rise.py: {repr(e)}")
     has_rise = False
 
+
+# =========================
+# CONFIG
+# =========================
 IMG_SIZE = 1024
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+Log.info(f"Device: {DEVICE}")
 
 transform = transforms.Compose([
     transforms.Resize((IMG_SIZE, IMG_SIZE)),
@@ -61,6 +146,7 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
     global correct, total, all_labels, all_scores
 
     base = os.path.splitext(os.path.basename(image_path))[0]
+    Log.section(f"Processing {base}")
 
     gradcam_root = os.path.join(result_root, "gradcam")
     folders = {
@@ -75,9 +161,9 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
         os.makedirs(p, exist_ok=True)
 
     try:
-        img = Image.open(image_path).convert('RGB')
+        img = Image.open(image_path).convert("RGB")
     except Exception as e:
-        print(f"Fehler beim Laden von {image_path}: {e}")
+        Log.error(f"Could not load image {image_path}: {e}")
         return
 
     img_tensor = transform(img).unsqueeze(0).to(DEVICE)
@@ -88,7 +174,7 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
     label = "Real" if label_idx == 1 else "Fake"
     score = float(probs[label_idx])
 
-    print(f"{os.path.basename(image_path)} --> Score: {score:.4f} ({label})")
+    Log.info(f"Prediction: {label} | Score: {score:.4f}")
 
     filename_lower = os.path.basename(image_path).lower()
     true_label = 1 if "real" in filename_lower else 0
@@ -96,141 +182,95 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
     all_labels.append(true_label)
     all_scores.append(score)
     total += 1
+
     if label_idx == true_label:
         correct += 1
 
     img_np = _img_tensor_to_display_np(img_tensor)
 
+    # =========================
+    # GRAD-CAM
+    # =========================
+    Log.section("Grad-CAM")
+
     try:
         cam_baseline = baseline_gradcam(
-            D_softmax,
-            img_tensor,
-            target_layer,
+            D_softmax, img_tensor, target_layer,
             class_idx=label_idx,
             upsample_size=(IMG_SIZE, IMG_SIZE),
             device=DEVICE
         )
-        save_overlay_and_raw(folders['baseline'], base, img_np, cam_baseline)
+        save_overlay_and_raw(folders["baseline"], base, img_np, cam_baseline)
+        Log.success("Saved baseline Grad-CAM")
     except Exception as e:
-        print("Fehler Baseline Grad-CAM:", e)
+        Log.error(f"Baseline Grad-CAM failed: {e}")
 
-    try:
-        cam_multilayer = multilayer_gradcam(
-            D_softmax,
-            img_tensor,
-            multilayer_list,
-            class_idx=label_idx,
-            upsample_size=(IMG_SIZE, IMG_SIZE),
-            layer_weights=None,
-            device=DEVICE
-        )
-        save_overlay_and_raw(folders['multilayer'], base, img_np, cam_multilayer)
-    except Exception as e:
-        print("Fehler Multi-layer Grad-CAM:", e)
-
-    try:
-        guided_rgb = guided_gradcam(
-            D_softmax,
-            img_tensor,
-            target_layer,
-            class_idx=label_idx,
-            upsample_size=(IMG_SIZE, IMG_SIZE),
-            device=DEVICE
-        )
-        save_overlay_and_raw(folders['guided'], base, img_np, guided_rgb)
-    except Exception as e:
-        print("Fehler Guided Grad-CAM:", e)
-
-    try:
-        cam_feat = feature_fusion_gradcam(
-            D_softmax,
-            img_tensor,
-            multilayer_list,
-            class_idx=label_idx,
-            upsample_size=(IMG_SIZE, IMG_SIZE),
-            layer_weights=None,
-            kaze_params={'n_keypoints': 300, 'blob_radius': 12},
-            device=DEVICE
-        )
-        save_overlay_and_raw(folders['feature_fusion'], base, img_np, cam_feat)
-    except Exception as e:
-        print("Fehler Feature-Fusion Grad-CAM:", e)
-
-    try:
-        combined = combined_supermap(
-            D_softmax,
-            img_tensor,
-            baseline_layer=target_layer,
-            multilayer_names=multilayer_list,
-            class_idx=label_idx,
-            upsample_size=(IMG_SIZE, IMG_SIZE),
-            layer_weights=None,
-            kaze_params={'n_keypoints': 300, 'blob_radius': 12},
-            device=DEVICE
-        )
-        save_overlay_and_raw(folders['combined'], base, img_np, combined)
-    except Exception as e:
-        print("Fehler Combined Supermap:", e)
-
+    # =========================
+    # RISE + SIFT
+    # =========================
     if has_rise:
-        result_root_rise = result_root
-        os.makedirs(result_root_rise, exist_ok=True)
+        Log.section("RISE")
 
         try:
-            # IMPORTANT: keep original image aligned with network input size
             img_np_raw = np.array(img.resize((IMG_SIZE, IMG_SIZE)).convert("RGB"))
 
-            print("DEBUG: run_classifier orig resized shape:", img_np_raw.shape)
-            print("DEBUG: run_classifier input_tensor shape:", tuple(img_tensor.shape))
+            Log.debug(f"Original resized image shape: {img_np_raw.shape}")
+            Log.debug(f"Input tensor shape: {tuple(img_tensor.shape)}")
 
-            generate_rise(
+            rise_maps = generate_rise(
                 model=D_softmax,
                 input_tensor=img_tensor,
                 class_idx=label_idx,
-                result_root=result_root_rise,
+                result_root=result_root,
                 base_name=base,
                 orig_img=img_np_raw,
-                variants=['baseline', 'sift_only', 'sift_grad', 'sift_grad_consensus'],
-                n_masks=600,
-                batch_size=4,
-                mask_size=16,
+                variants=["baseline", "sift_only"],  # ONLY 2 METHODS
+                n_masks=100,
+                batch_size=1,
+                mask_size=8,
                 device=DEVICE
             )
 
+            Log.success(f"Generated RISE methods: {list(rise_maps.keys())}")
+
         except Exception as e:
-            print("RISE konnte nicht erzeugt werden:", repr(e))
+            Log.error(f"RISE failed: {repr(e)}")
 
-    print(f"✓ Ergebnisse gespeichert (Grad-CAM + RISE Varianten) für {base}")
+    Log.success(f"Finished image: {base}")
 
 
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--network", default="stylegan2-ada-pytorch/FFHQ.pkl", help="Pfad zum Discriminator .pkl")
-    parser.add_argument("--folder", default="images/test", help="Ordner mit Testbildern")
-    parser.add_argument("--results", default="results", help="Ordner zum Speichern der Ergebnisse")
-    parser.add_argument("--no_show", action="store_true", help="Visualisierungen nicht anzeigen")
+    parser.add_argument("--network", default="stylegan2-ada-pytorch/FFHQ.pkl")
+    parser.add_argument("--folder", default="images/test")
+    parser.add_argument("--results", default="results")
+    parser.add_argument("--no_show", action="store_true")
     args = parser.parse_args()
+
+    Log.section("Loading model")
 
     D_raw = load_discriminator(args.network)
     D_softmax = DiscriminatorTwoClassWrapper(D_raw).to(DEVICE).eval()
 
-    print(f"\nDiscriminator geladen aus {args.network}\n")
+    Log.success(f"Discriminator loaded from: {args.network}")
 
-    test_folder = args.folder
     image_files = [
-        os.path.join(test_folder, f)
-        for f in os.listdir(test_folder)
+        os.path.join(args.folder, f)
+        for f in os.listdir(args.folder)
         if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
     ]
 
-    print(f"{len(image_files)} Bilder gefunden. Starte Klassifizierung...\n")
+    Log.info(f"Found {len(image_files)} images")
 
-    multilayer_list = ['b64.conv1', 'b32.conv1', 'b16.conv1']
-    baseline_layer = 'b64.conv1'
+    multilayer_list = ["b64.conv1", "b32.conv1", "b16.conv1"]
+    baseline_layer = "b64.conv1"
 
-    for img_path in tqdm(image_files, desc="Verarbeitung", unit="Bild"):
+    for img_path in image_files:  # REMOVED tqdm
         classify_and_explain(
             img_path,
             D_raw,
@@ -240,52 +280,3 @@ if __name__ == "__main__":
             result_root=args.results,
             show_images=not args.no_show
         )
-
-    if total > 0:
-        acc = (correct / total) * 100
-        print(f"\n===> Accuracy: {correct}/{total} = {acc:.2f}%")
-
-        os.makedirs(args.results, exist_ok=True)
-        with open(os.path.join(args.results, "accuracy.txt"), "w") as f:
-            f.write(f"Accuracy: {correct}/{total} = {acc:.2f}%\n")
-
-        all_labels_np = np.array(all_labels)
-        all_scores_np = np.array(all_scores)
-
-        try:
-            fpr, tpr, thresholds_roc = roc_curve(all_labels_np, all_scores_np)
-            roc_auc = auc(fpr, tpr)
-            optimal_idx_roc = np.argmax(tpr - fpr)
-            optimal_thresh_roc = thresholds_roc[optimal_idx_roc]
-
-            plt.figure(figsize=(3.5, 2.6))
-            plt.plot(fpr, tpr, label=f'AUC={roc_auc:.2f}')
-            plt.plot([0, 1], [0, 1], '--', color='gray')
-            plt.scatter(fpr[optimal_idx_roc], tpr[optimal_idx_roc], color='red', s=15)
-            plt.xlabel('FPR')
-            plt.ylabel('TPR')
-            plt.title('ROC-Kurve')
-            plt.tight_layout()
-            plt.savefig(os.path.join(args.results, "roc_curve_plot.pdf"), dpi=300, bbox_inches="tight")
-            print(f"✓ ROC-Kurve gespeichert: {os.path.join(args.results, 'roc_curve_plot.pdf')}")
-        except Exception as e:
-            print("ROC konnte nicht berechnet werden:", e)
-    else:
-        print("Keine gültigen Labels zur Accuracy- und ROC-Berechnung gefunden.")
-
-    from evaluation_rise import evaluate_all as evaluate_rise
-    from evaluation import evaluate_all as evaluate_gradcam
-
-    evaluate_gradcam(
-        results_root=args.results,
-        image_folder=args.folder,
-        network=args.network,
-        gt_path=None
-    )
-
-    evaluate_rise(
-        results_root=args.results,
-        image_folder=args.folder,
-        network=args.network,
-        gt_path=None
-    )

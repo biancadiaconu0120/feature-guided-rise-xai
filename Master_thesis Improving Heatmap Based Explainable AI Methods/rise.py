@@ -339,120 +339,6 @@ def contrast_rise(
     return heatmap.astype(np.float32)
 
 
-def _compute_gradient_map(
-        model,
-        input_tensor,
-        class_idx,
-        device=None,
-        norm_mean=(0.5, 0.5, 0.5),
-        norm_std=(0.5, 0.5, 0.5)
-):
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    x = input_tensor.detach().clone().to(device)
-    x.requires_grad_(True)
-
-    model = model.to(device)
-    model.eval()
-
-    out = model(x)
-    if isinstance(out, (tuple, list)):
-        out = out[0]
-
-    score = out[0, class_idx]
-    model.zero_grad()
-    score.backward(retain_graph=False)
-
-    grad = x.grad.detach().abs()
-    grad_map = grad.mean(dim=1, keepdim=False).cpu().numpy()[0]
-    grad_map = grad_map - grad_map.min()
-    if grad_map.max() > 0:
-        grad_map = grad_map / grad_map.max()
-
-    return grad_map.astype(np.float32)
-
-
-def grad_rise(
-        model,
-        input_tensor,
-        class_idx,
-        top_k=0.05,
-        n_masks=2000,
-        mask_size=8,
-        p=0.5,
-        batch_size=64,
-        device=None,
-        sampling_power=2.0,
-        final_multiply=True,
-        norm_mean=(0.5, 0.5, 0.5),
-        norm_std=(0.5, 0.5, 0.5)
-):
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    _, C, H, W = input_tensor.shape
-
-    grad_map = _compute_gradient_map(
-        model,
-        input_tensor,
-        class_idx,
-        device=device,
-        norm_mean=norm_mean,
-        norm_std=norm_std
-    )
-
-    masks = generate_random_masks(n_masks, mask_size, H, W, p=p, device='cpu')
-    masks_hr = _upsample_masks(masks, H, W, mode='bilinear').to(device)
-    mask_np = _to_numpy(masks_hr.squeeze(1))
-
-    overlap = (mask_np * grad_map[None, :, :]).reshape(mask_np.shape[0], -1).sum(axis=1)
-    ov = overlap - overlap.min()
-    if ov.max() > 0:
-        ov = ov / (ov.max() + 1e-8)
-
-    if sampling_power != 1.0:
-        overlap = np.power(ov, sampling_power)
-    else:
-        overlap = ov
-
-    overlap = (overlap - overlap.min()) / (overlap.max() - overlap.min() + 1e-8)
-
-    keep_idx = overlap > 0.0
-    if np.sum(keep_idx) < len(overlap):
-        mask_np = mask_np[keep_idx]
-        overlap = overlap[keep_idx]
-
-    masks_hr_kept = torch.tensor(mask_np).unsqueeze(1).to(device)
-
-    scores = _apply_masks_and_get_scores_chunk(
-        model,
-        input_tensor,
-        masks_hr_kept,
-        class_idx,
-        device=device,
-        batch_size=batch_size,
-        norm_mean=norm_mean,
-        norm_std=norm_std
-    )
-
-    if scores.shape[0] != mask_np.shape[0]:
-        n_eff = min(scores.shape[0], mask_np.shape[0])
-        scores = scores[:n_eff]
-        mask_np = mask_np[:n_eff]
-        overlap = overlap[:n_eff]
-
-    heatmap_acc = (scores[:, None, None] * overlap[:, None, None] * mask_np).sum(axis=0)
-    denom = mask_np.sum(axis=0) * (overlap.mean() + 1e-8)
-    heatmap = heatmap_acc / denom
-
-    if final_multiply:
-        refined = heatmap * grad_map
-        if refined.max() > 0:
-            refined = refined / (refined.max() + 1e-8)
-    else:
-        refined = heatmap
-
-    final_map = _normalize_map(refined)
-    return final_map.astype(np.float32)
-
-
 def combined_supermap_from_maps(maps_dict):
     if len(maps_dict) == 0:
         raise ValueError("combined_supermap_from_maps received an empty maps_dict")
@@ -522,10 +408,18 @@ def extract_sift_density_map(orig_img, H, W):
     if keypoints is None:
         keypoints = []
 
+    # robust normalization for SIFT responses
+    responses = np.array(
+        [max(kp.response, 1e-6) for kp in keypoints],
+        dtype=np.float32
+    ) if len(keypoints) > 0 else np.array([1.0], dtype=np.float32)
+
+    resp_ref = np.percentile(responses, 90) + 1e-8
+
     for kp in keypoints:
         x, y = int(round(kp.pt[0])), int(round(kp.pt[1]))
         if 0 <= y < H and 0 <= x < W:
-            weight = float(max(kp.response, 1e-6))
+            weight = min(float(max(kp.response, 1e-6) / resp_ref), 1.0)
             radius = max(1, int(round(0.35 * kp.size)))
             cv2.circle(density, (x, y), radius, weight, -1)
 
@@ -538,7 +432,6 @@ def extract_sift_density_map(orig_img, H, W):
     density = _normalize_map(density)
     return density
 
-
 def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cpu'):
     masks = []
 
@@ -548,19 +441,19 @@ def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cp
     if density_small.max() > 0:
         density_small = density_small / (density_small.max() + 1e-8)
 
-    # emphasize strong regions, but not too aggressively
-    density_small = density_small ** 2.0
+    # emphasize strong regions, but keep enough flexibility
+    density_small = density_small ** 1.8
 
-    # keep strongest structural regions
+    # identify stronger structural regions
     if np.any(density_small > 0):
-        thr = np.percentile(density_small[density_small > 0], 70)
+        thr = np.percentile(density_small[density_small > 0], 65)
     else:
         thr = 0.0
 
     strong = (density_small >= thr).astype(np.float32)
 
-    # probability map: strong areas get sampled more often
-    prob = np.clip(0.02 + 0.40 * strong + 0.28 * density_small, 0.0, 0.75)
+    # probability map: guided, but not too rigid
+    prob = np.clip(0.03 + 0.35 * strong + 0.30 * density_small, 0.0, 0.70)
 
     for _ in range(n_masks):
         random_mask = np.random.rand(mask_size, mask_size)
@@ -599,9 +492,9 @@ def sift_only_rise(model, input_tensor, class_idx, orig_img,
     if overlap.max() > 0:
         overlap = overlap / (overlap.max() + 1e-8)
 
-    # softer than before: still selective, less saturation/patchiness
-    overlap = overlap ** 2.2
-    overlap[overlap < 0.10] = 0.0
+    # softer weighting than before to avoid over-selecting only a few masks
+    overlap = overlap ** 1.6
+    overlap[overlap < 0.05] = 0.0
 
     scores = _apply_masks_and_get_scores_chunk(
         model,
@@ -627,161 +520,13 @@ def sift_only_rise(model, input_tensor, class_idx, orig_img,
     denom = (overlap[:, None, None] * mask_np).sum(axis=0) + 1e-8
     saliency = heatmap_acc / denom
 
-    # soften medium-high responses slightly
+    # slightly compress peaks for smoother and more readable maps
     saliency = np.power(np.clip(saliency, 0.0, None), 0.85)
 
     # final smoothing
     saliency = cv2.GaussianBlur(saliency, (5, 5), 0)
 
     return _normalize_map(saliency)
-
-
-def sift_grad_rise(model, input_tensor, class_idx, orig_img,
-                   n_masks=200, mask_size=8, batch_size=32, device=None):
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    _, C, H, W = input_tensor.shape
-
-    # 1) structural prior from SIFT
-    density_map = extract_sift_density_map(orig_img, H, W)
-
-    # 2) class-aware prior from gradients
-    grad_map = _compute_gradient_map(
-        model,
-        input_tensor,
-        class_idx,
-        device=device
-    )
-
-    # 3) fuse both priors
-    density_map = _normalize_map(0.65 * density_map + 0.35 * grad_map)
-
-    masks_hr = generate_sift_guided_masks(
-        n_masks, mask_size, H, W, density_map, device=device
-    )
-
-    mask_np = _to_numpy(masks_hr.squeeze(1))
-
-    # overlap between each mask and fused prior
-    overlap = (mask_np * density_map[None, :, :]).reshape(mask_np.shape[0], -1).sum(axis=1)
-    overlap = overlap - overlap.min()
-    if overlap.max() > 0:
-        overlap = overlap / (overlap.max() + 1e-8)
-
-    # softer than before: still selective, less saturation/patchiness
-    overlap = overlap ** 2.2
-    overlap[overlap < 0.10] = 0.0
-
-    scores = _apply_masks_and_get_scores_chunk(
-        model,
-        input_tensor,
-        masks_hr,
-        class_idx,
-        device=device,
-        batch_size=batch_size
-    )
-
-    if scores.shape[0] != mask_np.shape[0]:
-        n_eff = min(scores.shape[0], mask_np.shape[0])
-        scores = scores[:n_eff]
-        mask_np = mask_np[:n_eff]
-        overlap = overlap[:n_eff]
-
-    scores_norm = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
-
-    # soften score dominance
-    scores_norm = np.sqrt(scores_norm)
-
-    heatmap_acc = (scores_norm[:, None, None] * overlap[:, None, None] * mask_np).sum(axis=0)
-    denom = (overlap[:, None, None] * mask_np).sum(axis=0) + 1e-8
-    saliency = heatmap_acc / denom
-
-    # soften medium-high responses slightly
-    saliency = np.power(np.clip(saliency, 0.0, None), 0.85)
-
-    # final smoothing
-    saliency = cv2.GaussianBlur(saliency, (5, 5), 0)
-
-    return _normalize_map(saliency)
-
-def sift_grad_consensus_rise(model, input_tensor, class_idx, orig_img,
-                             n_masks=200, mask_size=8, batch_size=32, device=None):
-    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
-    _, C, H, W = input_tensor.shape
-
-    # 1) structural prior from SIFT
-    density_map = extract_sift_density_map(orig_img, H, W)
-
-    # 2) class-aware prior from gradients
-    grad_map = _compute_gradient_map(
-        model,
-        input_tensor,
-        class_idx,
-        device=device
-    )
-
-    # 3) stronger fusion: keep regions important in both maps
-    fused_map = _normalize_map(
-        0.55 * density_map +
-        0.45 * grad_map +
-        0.35 * (density_map * grad_map)
-    )
-
-    masks_hr = generate_sift_guided_masks(
-        n_masks, mask_size, H, W, fused_map, device=device
-    )
-
-    mask_np = _to_numpy(masks_hr.squeeze(1))
-
-    overlap = (mask_np * fused_map[None, :, :]).reshape(mask_np.shape[0], -1).sum(axis=1)
-    overlap = overlap - overlap.min()
-    if overlap.max() > 0:
-        overlap = overlap / (overlap.max() + 1e-8)
-
-    # adaptive filtering instead of fixed threshold
-    keep_thr = np.percentile(overlap, 35)
-    overlap[overlap < keep_thr] = 0.0
-
-    if np.all(overlap == 0):
-        overlap = np.ones_like(overlap, dtype=np.float32)
-
-
-    scores = _apply_masks_and_get_scores_chunk(
-        model,
-        input_tensor,
-        masks_hr,
-        class_idx,
-        device=device,
-        batch_size=batch_size
-    )
-
-    if scores.shape[0] != mask_np.shape[0]:
-        n_eff = min(scores.shape[0], mask_np.shape[0])
-        scores = scores[:n_eff]
-        mask_np = mask_np[:n_eff]
-        overlap = overlap[:n_eff]
-
-    scores_norm = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
-    scores_norm = np.sqrt(scores_norm)
-
-    heatmap_acc = (scores_norm[:, None, None] * overlap[:, None, None] * mask_np).sum(axis=0)
-    denom = (overlap[:, None, None] * mask_np).sum(axis=0) + 1e-8
-    saliency = heatmap_acc / denom
-
-    # consensus refinement from top-scoring masks
-    top_mask_idx = scores_norm >= np.percentile(scores_norm, 75)
-    if np.any(top_mask_idx):
-        consensus = mask_np[top_mask_idx].mean(axis=0)
-        consensus = _normalize_map(consensus)
-        saliency = saliency * consensus
-
-    # slight compression of extreme peaks
-    saliency = np.power(np.clip(saliency, 0.0, None), 0.9)
-
-    # smoother but edge-preserving final filtering
-    saliency = cv2.bilateralFilter(saliency.astype(np.float32), 9, 0.1, 5)
-
-    return _normalize_map(saliency)
-
 
 def generate_rise(model, input_tensor, class_idx,
                   result_root=None, base_name=None, orig_img=None,
@@ -831,17 +576,6 @@ def generate_rise(model, input_tensor, class_idx,
         except Exception as e:
             print("Warning: contrast_rise failed:", e)
 
-    if 'grad' in variants:
-        try:
-            m = grad_rise(
-                model, input_tensor, class_idx,
-                top_k=0.05, n_masks=n_masks, mask_size=mask_size, p=p,
-                batch_size=batch_size, device=device,
-                norm_mean=norm_mean, norm_std=norm_std
-            )
-            results_maps['grad'] = _normalize_map(m)
-        except Exception as e:
-            print("Warning: grad_rise failed:", e)
 
     if 'sift_only' in variants:
         try:
@@ -870,60 +604,7 @@ def generate_rise(model, input_tensor, class_idx,
         except Exception as e:
             print("DEBUG: sift_only_rise failed:", repr(e))
 
-    if 'sift_grad' in variants:
-        try:
-            print("DEBUG: entered sift_grad block")
-            print("DEBUG: orig_img type:", type(orig_img))
-            print("DEBUG: orig_img shape:", getattr(orig_img, "shape", None))
-            print("DEBUG: input_tensor shape:", tuple(input_tensor.shape))
 
-            m = sift_grad_rise(
-                model=model,
-                input_tensor=input_tensor,
-                class_idx=class_idx,
-                orig_img=orig_img,
-                n_masks=n_masks,
-                mask_size=mask_size,
-                batch_size=batch_size,
-                device=device
-            )
-
-            print("DEBUG: sift_grad_rise finished")
-            print("DEBUG: sift_grad map min/max:", np.min(m), np.max(m))
-
-            results_maps['sift_grad'] = _normalize_map(m)
-            print("DEBUG: sift_grad added to results_maps")
-
-        except Exception as e:
-            print("DEBUG: sift_grad_rise failed:", repr(e))
-
-
-    if 'sift_grad_consensus' in variants:
-        try:
-            print("DEBUG: entered sift_grad_consensus block")
-            print("DEBUG: orig_img type:", type(orig_img))
-            print("DEBUG: orig_img shape:", getattr(orig_img, "shape", None))
-            print("DEBUG: input_tensor shape:", tuple(input_tensor.shape))
-
-            m = sift_grad_consensus_rise(
-                model=model,
-                input_tensor=input_tensor,
-                class_idx=class_idx,
-                orig_img=orig_img,
-                n_masks=n_masks,
-                mask_size=mask_size,
-                batch_size=batch_size,
-                device=device
-            )
-
-            print("DEBUG: sift_grad_consensus_rise finished")
-            print("DEBUG: sift_grad_consensus map min/max:", np.min(m), np.max(m))
-
-            results_maps['sift_grad_consensus'] = _normalize_map(m)
-            print("DEBUG: sift_grad_consensus added to results_maps")
-
-        except Exception as e:
-            print("DEBUG: sift_grad_consensus_rise failed:", repr(e))
 
     if 'combined' in variants:
         try:
@@ -935,13 +616,13 @@ def generate_rise(model, input_tensor, class_idx,
         except Exception as e:
             print("Warning: combined_supermap failed:", e)
 
-    if 'baseline' in results_maps and 'grad' in results_maps:
-        try:
-            results_maps['baseline_refined_by_grad'] = _normalize_map(
-                results_maps['baseline'] * results_maps['grad']
-            )
-        except Exception:
-            pass
+    # if 'baseline' in results_maps and 'grad' in results_maps:
+    #     try:
+    #         results_maps['baseline_refined_by_grad'] = _normalize_map(
+    #             results_maps['baseline'] * results_maps['grad']
+    #         )
+    #     except Exception:
+    #         pass
 
     if result_root is not None and base_name is not None:
         rise_root = os.path.join(result_root, "rise")

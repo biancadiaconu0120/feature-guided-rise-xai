@@ -245,7 +245,7 @@ def plot_curves_example(curves_dict, out_path, title="Deletion/Insertion example
 def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                  methods=None, steps=50, batch=16, n_examples=6, baseline_method='baseline', device=None):
     if methods is None:
-        methods = ['baseline', 'sift_only', 'sift_grad', 'sift_grad_consensus']
+        methods = ['baseline', 'sift_only']
     out_root = os.path.join(results_root, "evaluation_rise")
     os.makedirs(out_root, exist_ok=True)
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -278,7 +278,10 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
 
         for m in methods:
             heat = load_heatmap(results_root, m, base)
-            if heat is None: continue
+
+            if heat is None:
+                print(f"Missing heatmap for method={m}, image={base}")
+                continue
             heat2 = heat.mean(axis=2) if heat.ndim == 3 else heat
             heat2 = (heat2 - heat2.min()) / (heat2.max() + 1e-8) if heat2.max() > 0 else heat2
 
