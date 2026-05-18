@@ -5,6 +5,7 @@ import builtins
 # =========================
 _original_print = builtins.print
 
+
 def filtered_print(*args, **kwargs):
     msg = " ".join(str(a) for a in args)
 
@@ -20,8 +21,8 @@ def filtered_print(*args, **kwargs):
 
     _original_print(*args, **kwargs)
 
-builtins.print = filtered_print
 
+builtins.print = filtered_print
 
 import os
 import warnings
@@ -115,7 +116,6 @@ try:
 except Exception as e:
     Log.error(f"Could not import rise.py: {repr(e)}")
     has_rise = False
-
 
 # =========================
 # CONFIG
@@ -231,7 +231,7 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
                 result_root=result_root,
                 base_name=base,
                 orig_img=img_np_raw,
-                variants=["baseline", "sift_only"],  # ONLY 2 METHODS
+                variants=["baseline", "sift_edge"],  # ONLY 2 METHODS
                 n_masks=500,
                 batch_size=4,
                 mask_size=16,

@@ -381,9 +381,6 @@ def extract_sift_density_map(orig_img, H, W):
     else:
         raise TypeError(f"extract_sift_density_map: unsupported orig_img type {type(orig_img)}")
 
-    if img.ndim != 3 or img.shape[2] != 3:
-        raise ValueError(f"extract_sift_density_map: expected RGB image with shape (H,W,3), got {img.shape}")
-
     if img.dtype != np.uint8:
         if img.max() <= 1.0:
             img = (img * 255.0).clip(0, 255).astype(np.uint8)
@@ -396,46 +393,132 @@ def extract_sift_density_map(orig_img, H, W):
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
 
     sift = cv2.SIFT_create(
-        nfeatures=800,
-        contrastThreshold=0.02,
-        edgeThreshold=8,
+        nfeatures=1000,
+        contrastThreshold=0.015,
+        edgeThreshold=10,
         sigma=1.2
     )
-    keypoints = sift.detect(gray, None)
 
+    keypoints = sift.detect(gray, None)
     density = np.zeros((H, W), dtype=np.float32)
 
-    if keypoints is None:
-        keypoints = []
+    if keypoints is None or len(keypoints) == 0:
+        density[:, :] = 1.0
+        return density
 
-    # robust normalization for SIFT responses
-    responses = np.array(
-        [max(kp.response, 1e-6) for kp in keypoints],
-        dtype=np.float32
-    ) if len(keypoints) > 0 else np.array([1.0], dtype=np.float32)
+    responses = np.array([max(kp.response, 1e-6) for kp in keypoints], dtype=np.float32)
+    sizes = np.array([max(kp.size, 1e-6) for kp in keypoints], dtype=np.float32)
 
-    resp_ref = np.percentile(responses, 90) + 1e-8
+    response_ref = np.percentile(responses, 90) + 1e-8
+    size_ref = np.percentile(sizes, 90) + 1e-8
 
     for kp in keypoints:
         x, y = int(round(kp.pt[0])), int(round(kp.pt[1]))
-        if 0 <= y < H and 0 <= x < W:
-            weight = min(float(max(kp.response, 1e-6) / resp_ref), 1.0)
-            radius = max(1, int(round(0.35 * kp.size)))
-            cv2.circle(density, (x, y), radius, weight, -1)
 
-    density = cv2.GaussianBlur(density, (15, 15), 0)
+        if 0 <= x < W and 0 <= y < H:
+            response_weight = min(kp.response / response_ref, 1.0)
+            size_weight = min(kp.size / size_ref, 1.0)
+
+            weight = 0.75 * response_weight + 0.25 * size_weight
+            radius = max(2, int(round(0.45 * kp.size)))
+
+            cv2.circle(density, (x, y), radius, float(weight), -1)
+
+    density = cv2.GaussianBlur(density, (21, 21), 0)
     density = _normalize_map(density)
 
-    # remove very weak residual regions
-    density[density < 0.10] = 0.0
-
+    density[density < 0.05] = 0.0
     density = _normalize_map(density)
+
     return density
 
 
-def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cpu'):
+def extract_sift_edge_map(orig_img, H, W):
+    density = extract_sift_density_map(orig_img, H, W)
+
+    edge = cv2.Canny((density * 255).astype(np.uint8), 40, 120)
+    edge = edge.astype(np.float32) / 255.0
+
+    edge = cv2.GaussianBlur(edge, (31, 31), 0)
+    edge = _normalize_map(edge)
+
+    return edge
+
+def sift_edge_rise(
+        model,
+        input_tensor,
+        class_idx,
+        orig_img,
+        n_masks=500,
+        mask_size=16,
+        p=0.5,
+        alpha=0.15,
+        batch_size=4,
+        device=None,
+        norm_mean=(0.5, 0.5, 0.5),
+        norm_std=(0.5, 0.5, 0.5)
+):
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    _, C, H, W = input_tensor.shape
+
+    edge_map = extract_sift_edge_map(orig_img, H, W)
+
+    edge_small = cv2.resize(
+        edge_map,
+        (mask_size, mask_size),
+        interpolation=cv2.INTER_AREA
+    ).astype(np.float32)
+
+    edge_small = _normalize_map(edge_small)
+
+    # very soft SIFT bias: still mostly random
+    prob = p + alpha * (edge_small - edge_small.mean())
+    prob = np.clip(prob, 0.35, 0.65)
+
     masks = []
 
+    for _ in range(n_masks):
+        random_mask = np.random.rand(mask_size, mask_size)
+        binary_mask = (random_mask < prob).astype(np.float32)
+
+        mask = cv2.resize(binary_mask, (W, H), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.GaussianBlur(mask, (7, 7), 0)
+        mask = np.clip(mask, 0.0, 1.0)
+
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        masks.append(mask)
+
+    masks_hr = torch.cat(masks, dim=0).to(device)
+    mask_np = _to_numpy(masks_hr.squeeze(1))
+
+    scores = _apply_masks_and_get_scores_chunk(
+        model,
+        input_tensor,
+        masks_hr,
+        class_idx,
+        device=device,
+        batch_size=batch_size,
+        norm_mean=norm_mean,
+        norm_std=norm_std
+    )
+
+    if scores.shape[0] != mask_np.shape[0]:
+        n_eff = min(scores.shape[0], mask_np.shape[0])
+        scores = scores[:n_eff]
+        mask_np = mask_np[:n_eff]
+
+    scores_norm = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+    heatmap_acc = (scores_norm[:, None, None] * mask_np).sum(axis=0)
+    denom = mask_np.sum(axis=0) + 1e-8
+
+    saliency = heatmap_acc / denom
+    saliency = cv2.GaussianBlur(saliency.astype(np.float32), (5, 5), 0)
+
+    return _normalize_map(saliency)
+
+
+def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cpu'):
     density_small = cv2.resize(
         density_map,
         (mask_size, mask_size),
@@ -444,22 +527,22 @@ def generate_sift_guided_masks(n_masks, mask_size, H, W, density_map, device='cp
 
     density_small = _normalize_map(density_small)
 
-    # stronger SIFT guidance
-    density_small = density_small ** 1.3
+    density_small = density_small ** 1.1
 
-    # keep small random probability so it remains RISE-like/model-agnostic
-    base_prob = 0.10
-    sift_strength = 0.75
+    base_prob = 0.20
+    sift_strength = 0.65
 
     prob = base_prob + sift_strength * density_small
-    prob = np.clip(prob, 0.05, 0.90)
+    prob = np.clip(prob, 0.10, 0.85)
+
+    masks = []
 
     for _ in range(n_masks):
         random_mask = np.random.rand(mask_size, mask_size)
         binary_mask = (random_mask < prob).astype(np.float32)
 
         mask = cv2.resize(binary_mask, (W, H), interpolation=cv2.INTER_LINEAR)
-        mask = cv2.GaussianBlur(mask, (11, 11), 0)
+        mask = cv2.GaussianBlur(mask, (9, 9), 0)
         mask = np.clip(mask, 0.0, 1.0)
 
         mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
@@ -490,8 +573,8 @@ def sift_only_rise(model, input_tensor, class_idx, orig_img,
         overlap = overlap / (overlap.max() + 1e-8)
 
     # softer weighting than before to avoid over-selecting only a few masks
-    overlap = overlap ** 1.6
-    overlap[overlap < 0.05] = 0.0
+    overlap = overlap ** 1.2
+    overlap[overlap < 0.02] = 0.0
 
     scores = _apply_masks_and_get_scores_chunk(
         model,
@@ -522,6 +605,169 @@ def sift_only_rise(model, input_tensor, class_idx, orig_img,
 
     # final smoothing
     saliency = cv2.GaussianBlur(saliency, (5, 5), 0)
+
+    return _normalize_map(saliency)
+
+
+def generate_soft_sift_masks(
+        n_masks,
+        mask_size,
+        H,
+        W,
+        density_map,
+        p=0.5,
+        alpha=0.2,
+        device='cpu'
+):
+    density_small = cv2.resize(
+        density_map,
+        (mask_size, mask_size),
+        interpolation=cv2.INTER_AREA
+    ).astype(np.float32)
+
+    density_small = _normalize_map(density_small)
+
+    # soft bias, not hard SIFT control
+    prob = p + alpha * (density_small - density_small.mean())
+    prob = np.clip(prob, 0.20, 0.80)
+
+    masks = []
+
+    for _ in range(n_masks):
+        random_mask = np.random.rand(mask_size, mask_size)
+        binary_mask = (random_mask < prob).astype(np.float32)
+
+        mask = cv2.resize(binary_mask, (W, H), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.GaussianBlur(mask, (9, 9), 0)
+        mask = np.clip(mask, 0.0, 1.0)
+
+        mask = torch.tensor(mask, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        masks.append(mask)
+
+    masks = torch.cat(masks, dim=0)
+    return masks.to(device)
+
+
+def soft_sift_rise(
+        model,
+        input_tensor,
+        class_idx,
+        orig_img,
+        n_masks=500,
+        mask_size=16,
+        p=0.5,
+        alpha=0.2,
+        batch_size=4,
+        device=None,
+        norm_mean=(0.5, 0.5, 0.5),
+        norm_std=(0.5, 0.5, 0.5)
+):
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    _, C, H, W = input_tensor.shape
+
+    density_map = extract_sift_density_map(orig_img, H, W)
+
+    masks_hr = generate_soft_sift_masks(
+        n_masks=n_masks,
+        mask_size=mask_size,
+        H=H,
+        W=W,
+        density_map=density_map,
+        p=p,
+        alpha=alpha,
+        device=device
+    )
+
+    mask_np = _to_numpy(masks_hr.squeeze(1))
+
+    scores = _apply_masks_and_get_scores_chunk(
+        model,
+        input_tensor,
+        masks_hr,
+        class_idx,
+        device=device,
+        batch_size=batch_size,
+        norm_mean=norm_mean,
+        norm_std=norm_std
+    )
+
+    if scores.shape[0] != mask_np.shape[0]:
+        n_eff = min(scores.shape[0], mask_np.shape[0])
+        scores = scores[:n_eff]
+        mask_np = mask_np[:n_eff]
+
+    scores_norm = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+    heatmap_acc = (scores_norm[:, None, None] * mask_np).sum(axis=0)
+    denom = mask_np.sum(axis=0) + 1e-8
+
+    saliency = heatmap_acc / denom
+
+    saliency = cv2.GaussianBlur(saliency.astype(np.float32), (5, 5), 0)
+
+    return _normalize_map(saliency)
+
+
+def sift_weighted_rise(
+        model,
+        input_tensor,
+        class_idx,
+        orig_img,
+        n_masks=500,
+        mask_size=16,
+        p=0.5,
+        beta=0.5,
+        batch_size=4,
+        device=None,
+        norm_mean=(0.5, 0.5, 0.5),
+        norm_std=(0.5, 0.5, 0.5)
+):
+    device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
+    _, C, H, W = input_tensor.shape
+
+    # 1. SIFT map from image only
+    density_map = extract_sift_density_map(orig_img, H, W)
+
+    # 2. Generate normal random RISE masks
+    masks = np.random.rand(n_masks, mask_size, mask_size) < p
+    masks = masks.astype(np.float32)
+    masks = torch.tensor(masks).unsqueeze(1).to(device)
+
+    masks_hr = _upsample_masks(masks, H, W, mode='bilinear')
+    mask_np = _to_numpy(masks_hr.squeeze(1))
+
+    # 3. Get model scores
+    scores = _apply_masks_and_get_scores_chunk(
+        model,
+        input_tensor,
+        masks_hr,
+        class_idx,
+        device=device,
+        batch_size=batch_size,
+        norm_mean=norm_mean,
+        norm_std=norm_std
+    )
+
+    if scores.shape[0] != mask_np.shape[0]:
+        n_eff = min(scores.shape[0], mask_np.shape[0])
+        scores = scores[:n_eff]
+        mask_np = mask_np[:n_eff]
+
+    scores_norm = (scores - scores.min()) / (scores.max() - scores.min() + 1e-8)
+
+    # 4. SIFT overlap per mask
+    overlap = (mask_np * density_map[None, :, :]).reshape(mask_np.shape[0], -1).mean(axis=1)
+    overlap = (overlap - overlap.min()) / (overlap.max() - overlap.min() + 1e-8)
+
+    # 5. Soft weighting: model score still dominates
+    weights = scores_norm * (1.0 + beta * overlap)
+
+    # 6. Normal RISE aggregation
+    heatmap_acc = (weights[:, None, None] * mask_np).sum(axis=0)
+    denom = mask_np.sum(axis=0) + 1e-8
+
+    saliency = heatmap_acc / denom
+    saliency = cv2.GaussianBlur(saliency.astype(np.float32), (5, 5), 0)
 
     return _normalize_map(saliency)
 
@@ -600,6 +846,81 @@ def generate_rise(model, input_tensor, class_idx,
 
         except Exception as e:
             print("DEBUG: sift_only_rise failed:", repr(e))
+
+    if 'soft_sift' in variants:
+        try:
+            print("DEBUG: entered soft_sift block")
+
+            m = soft_sift_rise(
+                model=model,
+                input_tensor=input_tensor,
+                class_idx=class_idx,
+                orig_img=orig_img,
+                n_masks=n_masks,
+                mask_size=mask_size,
+                p=p,
+                alpha=0.2,
+                batch_size=batch_size,
+                device=device,
+                norm_mean=norm_mean,
+                norm_std=norm_std
+            )
+
+            results_maps['soft_sift'] = _normalize_map(m)
+            print("DEBUG: soft_sift added to results_maps")
+
+        except Exception as e:
+            print("DEBUG: soft_sift_rise failed:", repr(e))
+
+    if 'sift_weighted' in variants:
+        try:
+            print("DEBUG: entered sift_weighted block")
+
+            m = sift_weighted_rise(
+                model=model,
+                input_tensor=input_tensor,
+                class_idx=class_idx,
+                orig_img=orig_img,
+                n_masks=n_masks,
+                mask_size=mask_size,
+                p=p,
+                beta=0.5,
+                batch_size=batch_size,
+                device=device,
+                norm_mean=norm_mean,
+                norm_std=norm_std
+            )
+
+            results_maps['sift_weighted'] = _normalize_map(m)
+            print("DEBUG: sift_weighted added to results_maps")
+
+        except Exception as e:
+            print("DEBUG: sift_weighted_rise failed:", repr(e))
+
+    if 'sift_edge' in variants:
+        try:
+            print("DEBUG: entered sift_edge block")
+
+            m = sift_edge_rise(
+                model=model,
+                input_tensor=input_tensor,
+                class_idx=class_idx,
+                orig_img=orig_img,
+                n_masks=n_masks,
+                mask_size=mask_size,
+                p=p,
+                alpha=0.15,
+                batch_size=batch_size,
+                device=device,
+                norm_mean=norm_mean,
+                norm_std=norm_std
+            )
+
+            results_maps['sift_edge'] = _normalize_map(m)
+            print("DEBUG: sift_edge added to results_maps")
+
+        except Exception as e:
+            print("DEBUG: sift_edge_rise failed:", repr(e))
 
     if 'combined' in variants:
         try:
