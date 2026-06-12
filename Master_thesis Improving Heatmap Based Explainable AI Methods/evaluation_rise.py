@@ -245,7 +245,7 @@ def plot_curves_example(curves_dict, out_path, title="Deletion/Insertion example
 def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                  methods=None, steps=50, batch=16, n_examples=6, baseline_method='baseline', device=None):
     if methods is None:
-        methods = ['baseline', "sift_edge"]
+        methods = ['baseline', 'sift_adaptive_resolution']
     out_root = os.path.join(results_root, "evaluation_rise")
     os.makedirs(out_root, exist_ok=True)
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -272,7 +272,7 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
     forced_examples = {"seed0151", "seed0152"}
     example_curves = {}
 
-    for base in tqdm(basenames, desc="Evaluating images"):
+    for base in tqdm(basenames, desc="Evaluating images_experiment6"):
         img_tensor = load_image_tensor(image_folder, base, device) if model else None
         curves_for_example = {}
 
@@ -283,10 +283,10 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                 print(f"Missing heatmap for method={m}, image={base}")
                 continue
             heat2 = heat.mean(axis=2) if heat.ndim == 3 else heat
-            heat2 = (heat2 - heat2.min()) / (heat2.max() + 1e-8) if heat2.max() > 0 else heat2
+            heat2 = (heat2 - heat2.min()) / (heat2.max() - heat2.min() + 1e-8) if heat2.max() > 0 else heat2
 
             frac_above, n_comp, avg_area = sparsity_metrics(heat2)
-            del_auc, ins_auc = np.nan, np.nan
+            del_auc, ins_auc, faithfulness_gap = np.nan, np.nan, np.nan
 
             if model is not None and img_tensor is not None:
                 probs = model(img_tensor);
@@ -299,6 +299,8 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                                                                         steps=steps, mode='insertion',
                                                                         baseline_mode='blur', device=device,
                                                                         batch_size=batch)
+                faithfulness_gap = ins_auc - del_auc
+
                 curves_for_example[m] = (del_scores, del_fracs, ins_scores, ins_fracs)
 
             iou_mean, pointing_acc = np.nan, np.nan
@@ -310,10 +312,16 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                 iou_mean, pointing_acc = np.nanmean(ious), np.nanmean(points)
 
             rows.append({
-                'image': base, 'method': m,
-                'deletion_auc': del_auc, 'insertion_auc': ins_auc,
-                'fraction_below_0.5': frac_above, 'n_components': n_comp, 'avg_component_area': avg_area,
-                'iou_mean': iou_mean, 'pointing_acc': pointing_acc
+                'image': base,
+                'method': m,
+                'deletion_auc': del_auc,
+                'insertion_auc': ins_auc,
+                'faithfulness_gap': faithfulness_gap,
+                'fraction_below_0.5': frac_above,
+                'n_components': n_comp,
+                'avg_component_area': avg_area,
+                'iou_mean': iou_mean,
+                'pointing_acc': pointing_acc
             })
 
         if curves_for_example and (len(example_curves) < n_examples or base in forced_examples):
@@ -325,7 +333,14 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
 
     agg_dir = os.path.join(out_root, "aggregates")
     os.makedirs(agg_dir, exist_ok=True)
-    metrics_to_plot = ['deletion_auc', 'insertion_auc', 'fraction_below_0.5', 'iou_mean', 'pointing_acc']
+    metrics_to_plot = [
+        'deletion_auc',
+        'insertion_auc',
+        'faithfulness_gap',
+        'fraction_below_0.5',
+        'iou_mean',
+        'pointing_acc'
+    ]
     for metric in metrics_to_plot:
         if metric not in df.columns or df[metric].dropna().size == 0: continue
         sum_df, pvals = aggregate_and_test(df[['image', 'method', metric]].dropna(), metric_col=metric,
@@ -346,7 +361,14 @@ def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                             title=f"Insertion - {base}")
 
     pivot = df.pivot_table(index='image', columns='method',
-                           values=['deletion_auc', 'insertion_auc', 'fraction_below_0.5', 'iou_mean', 'pointing_acc'])
+                           values=[
+                               'deletion_auc',
+                               'insertion_auc',
+                               'faithfulness_gap',
+                               'fraction_below_0.5',
+                               'iou_mean',
+                               'pointing_acc'
+                           ])
     pivot.to_csv(os.path.join(out_root, "pivot_metrics.csv"), index=False)
 
     print("Evaluation complete. Check folder:", out_root)

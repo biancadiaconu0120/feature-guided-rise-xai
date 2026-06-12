@@ -313,7 +313,7 @@ def evaluate_all(
     forced_examples = {"seed0151", "seed0152"}
     example_curves = {}
 
-    for base in tqdm(basenames, desc="Evaluating images"):
+    for base in tqdm(basenames, desc="Evaluating images_experiment6"):
         img_tensor = None
         if model is not None:
             try:

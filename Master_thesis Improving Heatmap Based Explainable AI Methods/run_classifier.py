@@ -12,7 +12,7 @@ def filtered_print(*args, **kwargs):
     hide = [
         "Setting up PyTorch plugin",
         "upfirdn2d_plugin",
-        "Evaluating images:",
+        "Evaluating images_experiment6:",
         "Processing:",
     ]
 
@@ -231,10 +231,11 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
                 result_root=result_root,
                 base_name=base,
                 orig_img=img_np_raw,
-                variants=["baseline", "sift_edge"],  # ONLY 2 METHODS
-                n_masks=500,
-                batch_size=4,
-                mask_size=16,
+                variants=["baseline", "sift_adaptive_resolution"],
+                n_masks=args.n_masks,
+                mask_size=args.coarse,
+                fine_mask_size=args.fine,
+                batch_size=1,
                 device=DEVICE
             )
 
@@ -254,9 +255,12 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--network", default="stylegan2-ada-pytorch/FFHQ.pkl")
-    parser.add_argument("--folder", default="images/test")
+    parser.add_argument("--folder", default="images/ffhq_test_flat")
     parser.add_argument("--results", default="results")
     parser.add_argument("--no_show", action="store_true")
+    parser.add_argument("--n_masks", type=int, default=4000)
+    parser.add_argument("--coarse", type=int, default=16)
+    parser.add_argument("--fine", type=int, default=48)
     args = parser.parse_args()
 
     Log.section("Loading model")
@@ -272,7 +276,7 @@ if __name__ == "__main__":
         if f.lower().endswith((".jpg", ".jpeg", ".png", ".bmp"))
     ]
 
-    Log.info(f"Found {len(image_files)} images")
+    Log.info(f"Found {len(image_files)} images_experiment6")
 
     multilayer_list = ["b64.conv1", "b32.conv1", "b16.conv1"]
     baseline_layer = "b64.conv1"
