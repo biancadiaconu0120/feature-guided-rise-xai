@@ -36,7 +36,7 @@ def _apply_jet_colormap_uint8(map_norm):
 # ==============================================================================
 def _prepare_display_img(orig_img):
     if torch.is_tensor(orig_img):
-        arr = orig_img.detach().cpu().squeeze(0).permute(1, 2, 0).numpy()
+        arr = orig_img.detach().cpu().squeeze(0).permute(1, 2, 0).numpy()#1x3xHxW->HxWx3 ->numpy
     elif isinstance(orig_img, np.ndarray):
         arr = orig_img
     else:
@@ -45,10 +45,10 @@ def _prepare_display_img(orig_img):
     arr = arr.astype(np.float32)
 
     if arr.min() < 0.0:
-        arr = (arr * 0.5) + 0.5
+        arr = (arr * 0.5) + 0.5  #normalize check [-1,1] -> [0,1]
 
     if arr.max() > 1.0:
-        arr = np.clip(arr / 255.0, 0.0, 1.0)
+        arr = np.clip(arr / 255.0, 0.0, 1.0)  #the same
 
     arr = np.clip(arr, 0.0, 1.0)
     return arr
@@ -59,8 +59,8 @@ def _prepare_display_img(orig_img):
 # Blends the colored heatmap with the original image.
 # ==============================================================================
 def _blend_overlay_with_display(display_img, jet_rgb_u8, map_norm, alpha=0.45):
-    heat = jet_rgb_u8.astype(np.float32) / 255.0
-    map_exp = np.expand_dims(np.clip(map_norm, 0.0, 1.0), axis=2)
+    heat = jet_rgb_u8.astype(np.float32) / 255.0 #convert to [0,1] color
+    map_exp = np.expand_dims(np.clip(map_norm, 0.0, 1.0), axis=2) # HxW->1xHxW
     alpha_map = alpha * map_exp
     overlay = display_img * (1.0 - alpha_map) + heat * alpha_map
     overlay = np.clip(overlay, 0.0, 1.0)
@@ -258,7 +258,7 @@ def baseline_rise(
         s=16,
         p1=0.5,
         batch_size=1,
-        chunk_size=50,
+        chunk_size=200,
         device=None,
         norm_mean=(0.5, 0.5, 0.5),
         norm_std=(0.5, 0.5, 0.5)
@@ -307,8 +307,8 @@ def baseline_rise(
         print(f"DEBUG: baseline processed {processed}/{N} masks")
 
         del masks, masks_hr, mask_np
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
 
     saliency = heatmap_acc / (denom + 1e-8)
     saliency = saliency / p1
@@ -622,8 +622,8 @@ def sift_edge_rise(
         print(f"DEBUG: sift_edge processed {processed}/{n_masks} masks")
 
         del masks, masks_hr, mask_np
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache()
 
     saliency = heatmap_acc / (denom + 1e-8)
     saliency = cv2.GaussianBlur(saliency.astype(np.float32), (5, 5), 0)
@@ -742,7 +742,7 @@ def generate_soft_sift_masks(
         W,
         density_map,
         p=0.5,
-        alpha=0.2,
+        alpha=0.05,
         device='cpu'
 ):
     density_small = cv2.resize(
@@ -786,7 +786,7 @@ def soft_sift_rise(
         n_masks=500,
         mask_size=16,
         p=0.5,
-        alpha=0.2,
+        alpha=0.05,
         batch_size=4,
         device=None,
         norm_mean=(0.5, 0.5, 0.5),
@@ -850,7 +850,7 @@ def sift_weighted_rise(
         n_masks=500,
         mask_size=16,
         p=0.5,
-        beta=0.5,
+        beta=0.1,
         batch_size=4,
         device=None,
         norm_mean=(0.5, 0.5, 0.5),
@@ -1028,7 +1028,7 @@ def adaptive_resolution_sift_rise(
 
     # Combine coarse decision map with adaptive-resolution refined map
     final_map = 0.30 * coarse_map + 0.70 * refined_map
-    final_map[final_map < 0.40] = 0.0
+    # final_map[final_map < 0.40] = 0.0
     final_map = cv2.GaussianBlur(final_map.astype(np.float32), (5, 5), 0)
     final_map = _normalize_map(final_map)
 
@@ -1049,7 +1049,7 @@ def sift_adaptive_resolution_rise(
         coarse_mask_size=16,
         fine_mask_size=48,
         p=0.5,
-        chunk_size=50,
+        chunk_size=200,
         batch_size=4,
         device=None,
         norm_mean=(0.5, 0.5, 0.5),
@@ -1064,9 +1064,9 @@ def sift_adaptive_resolution_rise(
     sift_map = _normalize_map(sift_map)
 
     # SIFT only decides WHERE high-resolution masks are used
-    adaptive_region = (sift_map > 0.35).astype(np.float32)
-    adaptive_region = cv2.GaussianBlur(adaptive_region, (9, 9), 0)
-    adaptive_region = np.clip(adaptive_region, 0.0, 1.0)
+    adaptive_region = cv2.GaussianBlur(sift_map.astype(np.float32), (15, 15), 0)
+    adaptive_region = _normalize_map(adaptive_region)
+    adaptive_region = np.clip(adaptive_region, 0.0, 0.7)
 
     heatmap_acc = np.zeros((H, W), dtype=np.float32)
     denom = np.zeros((H, W), dtype=np.float32)
@@ -1218,7 +1218,7 @@ def generate_rise(model, input_tensor, class_idx,
                 n_masks=n_masks,
                 mask_size=mask_size,
                 p=p,
-                alpha=0.2,
+                alpha=0.05,
                 batch_size=batch_size,
                 device=device,
                 norm_mean=norm_mean,
@@ -1243,7 +1243,7 @@ def generate_rise(model, input_tensor, class_idx,
                 n_masks=n_masks,
                 mask_size=mask_size,
                 p=p,
-                beta=0.5,
+                beta=0.1,
                 batch_size=batch_size,
                 device=device,
                 norm_mean=norm_mean,
@@ -1270,7 +1270,7 @@ def generate_rise(model, input_tensor, class_idx,
                 p=p,
                 alpha=0.15,
                 batch_size=batch_size,
-                chunk_size=50,
+                chunk_size=200,
                 device=device,
                 norm_mean=norm_mean,
                 norm_std=norm_std
@@ -1321,7 +1321,7 @@ def generate_rise(model, input_tensor, class_idx,
                 coarse_mask_size=mask_size,
                 fine_mask_size=fine_mask_size,
                 p=p,
-                chunk_size=50,
+                chunk_size=200,
                 batch_size=batch_size,
                 device=device,
                 norm_mean=norm_mean,

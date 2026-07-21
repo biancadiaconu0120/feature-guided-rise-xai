@@ -163,7 +163,7 @@ def deletion_insertion_auc(model, orig_tensor, sal_map, class_idx, steps=50, mod
             mask_flat = np.zeros(total_pix, dtype=np.float32)
             mask_flat[order[:k]] = 1
             mask = mask_flat.reshape(H, W)
-            inp = compose_image_with_mask(orig_tensor, mask, mode='mean')
+            inp = compose_image_with_mask(orig_tensor, mask, mode=baseline_mode)
         p = batched_forward(model, inp, device)[0, class_idx]
         scores.append(p)
         fractions.append(k / float(total_pix))
@@ -245,7 +245,7 @@ def plot_curves_example(curves_dict, out_path, title="Deletion/Insertion example
 def evaluate_all(results_root, image_folder, network=None, gt_path=None,
                  methods=None, steps=50, batch=16, n_examples=6, baseline_method='baseline', device=None):
     if methods is None:
-        methods = ['baseline', 'sift_adaptive_resolution']
+        methods = ['baseline', args.variant]
     out_root = os.path.join(results_root, "evaluation_rise")
     os.makedirs(out_root, exist_ok=True)
     device = device or ('cuda' if torch.cuda.is_available() else 'cpu')
@@ -387,6 +387,7 @@ if __name__ == "__main__":
     parser.add_argument('--steps', type=int, default=50)
     parser.add_argument('--batch', type=int, default=16)
     parser.add_argument('--baseline_method', default='baseline')
+    parser.add_argument('--variant', default='sift_adaptive_resolution')
     args = parser.parse_args()
     evaluate_all(
         results_root=args.results_root,

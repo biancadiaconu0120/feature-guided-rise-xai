@@ -198,20 +198,22 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
     # =========================
     # GRAD-CAM
     # =========================
-    Log.section("Grad-CAM")
+    if not args.skip_gradcam:
+        Log.section("Grad-CAM")
 
-    try:
-        cam_baseline = baseline_gradcam(
-            D_softmax, img_tensor, target_layer,
-            class_idx=label_idx,
-            upsample_size=(IMG_SIZE, IMG_SIZE),
-            device=DEVICE
-        )
-        save_overlay_and_raw(folders["baseline"], base, img_np, cam_baseline)
-        Log.success("Saved baseline Grad-CAM")
-    except Exception as e:
-        Log.error(f"Baseline Grad-CAM failed: {e}")
-
+        try:
+            cam_baseline = baseline_gradcam(
+                D_softmax, img_tensor, target_layer,
+                class_idx=label_idx,
+                upsample_size=(IMG_SIZE, IMG_SIZE),
+                device=DEVICE
+            )
+            save_overlay_and_raw(folders["baseline"], base, img_np, cam_baseline)
+            Log.success("Saved baseline Grad-CAM")
+        except Exception as e:
+            Log.error(f"Baseline Grad-CAM failed: {e}")
+    else:
+        Log.info("Skipping Grad-CAM")
     # =========================
     # RISE + SIFT
     # =========================
@@ -231,11 +233,11 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
                 result_root=result_root,
                 base_name=base,
                 orig_img=img_np_raw,
-                variants=["baseline", "sift_adaptive_resolution"],
+                variants=["baseline", args.variant],
                 n_masks=args.n_masks,
                 mask_size=args.coarse,
                 fine_mask_size=args.fine,
-                batch_size=1,
+                batch_size=args.rise_batch,
                 device=DEVICE
             )
 
@@ -245,6 +247,9 @@ def classify_and_explain(image_path, D_raw, D_softmax, target_layer, multilayer_
             Log.error(f"RISE failed: {repr(e)}")
 
     Log.success(f"Finished image: {base}")
+    del img_tensor
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # =========================
@@ -261,6 +266,10 @@ if __name__ == "__main__":
     parser.add_argument("--n_masks", type=int, default=4000)
     parser.add_argument("--coarse", type=int, default=16)
     parser.add_argument("--fine", type=int, default=48)
+    parser.add_argument("--variant", default="sift_adaptive_resolution")
+    parser.add_argument("--rise_batch", type=int, default=16)
+    parser.add_argument("--skip_gradcam", action="store_true")
+
     args = parser.parse_args()
 
     Log.section("Loading model")
